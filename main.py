@@ -10,8 +10,8 @@ import os
 
 
 
-st.set_page_config(page_title="쇼핑에이전트")
-st.title("쇼핑에이전트")
+st.set_page_config(page_title="운동화 쇼핑 에이전트")
+st.title("운동화 쇼핑 에이전트")
 
 
 #API KEY 설정
