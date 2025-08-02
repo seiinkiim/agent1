@@ -53,7 +53,7 @@ if user_input := st.chat_input("메시지를 입력해 주세요"):
         stream_handler=StreamHandler(st.empty())
 
         #1. 모델생성
-        llm = ChatOpenAI(model_name="o4-mini", streaming=True, callbacks=[stream_handler])
+        llm = ChatOpenAI(model_name="gpt-4o-mini-2024-07-18", streaming=True, callbacks=[stream_handler])
         
         #2. 프롬프트 생성
         prompt = ChatPromptTemplate.from_messages(
