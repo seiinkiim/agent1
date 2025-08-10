@@ -1,5 +1,15 @@
 streamlit
-openai
 langchain
-langchain-openai
 langchain-community
+langchain-core
+langchain-openai
+langchain-text-splitters
+faiss-cpu
+sentence-transformers
+transformers
+torch
+huggingface-hub
+pandas
+scikit-learn
+numpy
+
