@@ -3,6 +3,7 @@
 import re
 import os
 import time
+import random  # 인증번호용
 import streamlit as st
 import utils
 # LangChain core
@@ -84,8 +85,63 @@ def build_query_from_history_and_input(history: BaseChatMessageHistory, user_inp
     return query
 
 
-def join_docs(docs):
-    """검색 결과를 한 줄 요약(브랜드/제품명/가격/설명/구매링크)으로 정리"""
+# ---------------------------
+# 링크 유틸 / 사용자 답변 요약 / 설명 재작성
+# ---------------------------
+def _md_link(url: str, label: str = "구매링크") -> str:
+    """URL을 [라벨](URL) 형태의 마크다운 링크로 변환 (스킴 보정 포함)"""
+    if not url:
+        return ""
+    u = str(url).strip()
+    if not re.match(r"^https?://", u, re.IGNORECASE):
+        u = "http://" + u
+    return f"[{label}]({u})"
+
+def summarize_user_answers(history: BaseChatMessageHistory, max_turns: int = 8) -> str:
+    """최근 human/user 발화만 모아 한 줄 요약 (너무 일반적인 트리거 문구는 제외)"""
+    if not hasattr(history, "messages"):
+        return ""
+    answers = []
+    for m in history.messages[-max_turns*2:]:
+        role = getattr(m, "type", getattr(m, "role", ""))
+        if role in ("human", "user"):
+            txt = (getattr(m, "content", "") or "").strip()
+            if txt in ("운동화 추천해줘", "추천해줘", "운동화 보여줘"):
+                continue
+            answers.append(txt)
+    return " / ".join(answers[-6:])  # 최신 6개까지
+
+def rewrite_description_with_answers(brand: str, name: str, price: str, original_desc: str, user_answers: str) -> str:
+    """제품 원본 설명 + 사용자 답변을 근거로 1~2문장 재작성 (컨텍스트 외 정보 금지)"""
+    if not os.environ.get("OPENAI_API_KEY"):
+        return ""
+    llm_small = ChatOpenAI(model_name="gpt-4o-mini", temperature=0.4, max_tokens=120)
+    system_msg = (
+        "당신은 러닝화 추천 설명을 작성하는 카피라이터입니다. "
+        "다음 제품 설명과 사용자 답변만을 근거로, 제품 강점을 사용자 답변과 직접 연결해 "
+        "한국어로 1~2문장을 작성하세요. 과장/추측 금지. 재작성 문장만 출력하세요."
+    )
+    user_msg = (
+        f"[사용자 답변 요약]\n{user_answers}\n\n"
+        f"[제품 정보]\n브랜드: {brand}\n제품명: {name}\n가격: {price}\n"
+        f"[원본 설명]\n{original_desc}"
+    )
+    try:
+        resp = llm_small.invoke(
+            [{"role": "system", "content": system_msg},
+             {"role": "user", "content": user_msg}]
+        )
+        text = (getattr(resp, "content", "") or "").strip()
+        return re.sub(r"\s+", " ", text)
+    except Exception:
+        return ""
+
+
+# ---------------------------
+# 컨텍스트 생성 (원본설명 + 재작성 + 구매링크 마크다운)
+# ---------------------------
+def join_docs_with_rewrite(docs, user_answers: str):
+    """브랜드/제품명/가격/설명/구매링크를 한 줄로. 설명은 '원본 + 재작성'."""
     rows = []
     for d in docs:
         t = d.page_content
@@ -100,21 +156,21 @@ def join_docs(docs):
         desc  = grab("제품설명")
         url   = grab("구매링크")
 
+        if not url:
+            continue  # 링크 없는 항목 제외
+
+        link_md = _md_link(url, "구매링크")
+        rewritten = rewrite_description_with_answers(brand, name, price, desc, user_answers)
+        final_desc = f"{desc} {rewritten}".strip() if rewritten else desc
+
         rows.append(
-            f"브랜드:{brand} | 제품명:{name} | 가격:{price} | 설명:{desc} | 구매링크:{url}"
+            f"브랜드:{brand} | 제품명:{name} | 가격:{price} | 설명:{final_desc} | {link_md}"
         )
     return "\n".join(rows)
 
 
-#def make_product_link(brand: str, name: str) -> str:
- #   """실제 PDP가 없을 때도 안전하게 동작하도록 검색 링크 생성"""
-  #  import urllib.parse
-   # q = urllib.parse.quote_plus(f"{brand} {name}")
-    #return f"https://www.google.com/search?q={q}"
-
-
 # ---------------------------
-# 프롬프트 (코드2의 워크플로 유지 + RAG 컨텍스트 주입)
+# 프롬프트 (워크플로 유지 + RAG 컨텍스트 주입)
 # ---------------------------
 SYSTEM_PROMPT = """# 작업 설명: 운동화 쇼핑 에이전트
 
@@ -187,17 +243,17 @@ SYSTEM_PROMPT = """# 작업 설명: 운동화 쇼핑 에이전트
 추천 형식 규칙 (절대 위반 금지)
 - 추천시, 구매링크도 함께 제공하여 추천해주세요.
 - 반드시 다음과 같은 형식으로 리스트 3개를 출력하세요:
-  - `1. [브랜드] [제품명] | [가격] | [설명] | [구매링크] `
+  - `1. [브랜드] [제품명] | [가격] | [설명] | [구매링크](URL)`
   - `2. ...`
   - `3. ...`
 - 각 줄은 숫자 순번(1., 2., 3.)으로 시작해야 하며, 줄바꿈된 목록 형태여야 합니다.
 - 각 운동화는 실제 브랜드명, 제품명, 가격과 함께 한 줄 설명을 포함해야 합니다.
-- 설명에는 반드시 사용자가 언급한 기능 또는 조건이 포함되어야 합니다.
+- **설명에는 반드시 사용자가 언급한 기능 또는 조건이 포함되어야 하며**, 컨텍스트의 설명(원본+재작성)을 근거로 쓰세요.
+- **링크 텍스트는 반드시 '구매링크'**를 사용하고, 마크다운 링크(`[구매링크](URL)`)로 출력하세요.
+- 컨텍스트에 제공된 링크를 그대로 사용하세요.
 
 형식 예시 (참고용)
-1. 나이키 에어줌 페가수스 40 129,000원 - 무게감이 있으며 통풍감이 좋고 쿠션감이 뛰어난 운동화입니다 - 구매링크 : <링크>
-
-위 형식은 절대 변경하지 마세요.
+1. 나이키 에어줌 페가수스 40 | 129,000원 | 통풍성 있는 갑피와 안정적인 쿠션으로 장거리 주행에서 발 피로를 줄여줍니다. | [구매링크](https://example.com)
 
 ---
 ### 6단계: 대화 종료 
@@ -205,13 +261,6 @@ SYSTEM_PROMPT = """# 작업 설명: 운동화 쇼핑 에이전트
 - 운동화 추천이 끝났음을 사용자에게 명확하게 알립니다.
 - 반드시 아래 문장을 그대로 출력합니다. (글자, 띄어쓰기, 문장 부호를 절대 변경하지 마세요.)
     운동화 추천이 종료되었습니다! 
-    "대화 종료" 를 입력해주시면 인증번호를 알려드립니다.
-    
-### 7단계: 인증번호 제공
-- 사용자가 "대화 종료" 라고 입력한 경우, 새로운 한 줄에 다음 형식으로 4자리 숫자 인증번호를 제공합니다.
-    예시: 인증번호: 4827
-- 인증번호는 매번 랜덤한 4자리 숫자로 생성해야 하며, 앞에 0이 올 수도 있습니다.
-- 인증번호는 위 형식과 완전히 동일하게 출력해야 합니다.
 
 """
 
@@ -242,7 +291,11 @@ chain_with_memory = RunnableWithMessageHistory(
 # ---------------------------
 if len(st.session_state["messages"]) > 0:
     for role, msg in st.session_state["messages"]:
-        st.chat_message(role).write(msg)
+        # assistant 메시지는 마크다운으로 렌더 → [구매링크](URL) 클릭 가능
+        if role == "assistant":
+            st.chat_message(role).markdown(msg)
+        else:
+            st.chat_message(role).write(msg)
 
 
 # ---------------------------
@@ -253,11 +306,12 @@ if user_input := st.chat_input("메시지를 입력해 주세요"):
     st.chat_message("user").write(user_input)
     st.session_state["messages"].append(("user", user_input))
 
-    # RAG 컨텍스트 생성
+    # RAG 컨텍스트 생성 (사용자 답변 요약 → 제품 설명 재작성 포함)
     history = get_session_history("abc123")
     query = build_query_from_history_and_input(history, user_input)
     rag_docs = retriever.get_relevant_documents(query)
-    context = join_docs(rag_docs)
+    user_answers = summarize_user_answers(history)
+    context = join_docs_with_rewrite(rag_docs, user_answers)
 
     # 응답(스트리밍)
     with st.chat_message("assistant"):
@@ -270,4 +324,9 @@ if user_input := st.chat_input("메시지를 입력해 주세요"):
     # 최종 텍스트 저장
     st.session_state["messages"].append(("assistant", response))
 
-
+    # 응답에 종료 문구가 있으면 즉시 인증번호 출력
+    if "운동화 추천이 종료되었습니다!" in response:
+        code = f"{random.randint(0, 9999):04d}"
+        end_msg = f"인증번호: {code}"
+        st.chat_message("assistant").write(end_msg)
+        st.session_state["messages"].append(("assistant", end_msg))
