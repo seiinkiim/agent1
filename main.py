@@ -86,7 +86,7 @@ def build_query_from_history_and_input(history: BaseChatMessageHistory, user_inp
 
 
 # ---------------------------
-# 링크 유틸 / 사용자 답변 요약 / 설명 재작성
+# 링크/포매팅 유틸 + 설명 재작성
 # ---------------------------
 def _md_link(url: str, label: str = "구매링크") -> str:
     """URL을 [라벨](URL) 형태의 마크다운 링크로 변환 (스킴 보정 포함)"""
@@ -96,6 +96,44 @@ def _md_link(url: str, label: str = "구매링크") -> str:
     if not re.match(r"^https?://", u, re.IGNORECASE):
         u = "http://" + u
     return f"[{label}]({u})"
+
+def _apply_price_newline_to_text(md_text: str) -> str:
+    """
+    추천 줄에서 가격 뒤에 마크다운 강제 개행(공백 2개 + 줄바꿈)을 넣는다.
+    대상: '1. ... | 가격 | 설명 ...' 같은 줄
+    """
+    pattern = re.compile(r'(^\s*\d+\.\s.*?\|\s*[^|]+?\|)\s*', flags=re.M)
+    return pattern.sub(r'\1  \n ', md_text)
+
+def draw_random_products(df_rows, n=3) -> str:
+    """
+    (옵션) CSV 행들에서 임의 추천 3개 생성.
+    가격 뒤에 강제 개행을 넣어 포맷팅.
+    df_rows: pandas.DataFrame (브랜드, 제품명, 가격, 제품설명, 구매링크)
+    """
+    import pandas as pd
+    if isinstance(df_rows, pd.DataFrame):
+        sample = df_rows.sample(min(n, len(df_rows)), random_state=random.randint(0, 10**6))
+        lines = []
+        for i, (_, r) in enumerate(sample.iterrows(), start=1):
+            lines.append(
+                f"{i}. {r['브랜드']} {r['제품명']} | {r['가격']} |  \n {r['제품설명']} | {_md_link(r['구매링크'],'구매링크')}"
+            )
+        return "\n".join(lines)
+    return ""
+
+def rows_to_output(rows: list[dict]) -> str:
+    """
+    코드 생성 추천용 포매터.
+    rows: [{brand,name,price,desc,url}]
+    가격 뒤에 강제 개행을 넣어 포맷팅.
+    """
+    out = []
+    for i, r in enumerate(rows, start=1):
+        out.append(
+            f"{i}. {r['brand']} {r['name']} | {r['price']} |  \n {r['desc']} | {_md_link(r['url'],'구매링크')}"
+        )
+    return "\n".join(out)
 
 def summarize_user_answers(history: BaseChatMessageHistory, max_turns: int = 8) -> str:
     """최근 human/user 발화만 모아 한 줄 요약 (너무 일반적인 트리거 문구는 제외)"""
@@ -309,15 +347,21 @@ if user_input := st.chat_input("메시지를 입력해 주세요"):
     context = join_docs_with_rewrite(rag_docs, user_answers)
 
     with st.chat_message("assistant"):
-        stream_handler = StreamHandler(st.empty())
+        # 스트리밍 + 최종 포맷 오버라이트(가격 뒤 줄바꿈 적용)
+        placeholder = st.empty()
+        stream_handler = StreamHandler(placeholder)
         response = chain_with_memory.invoke(
             {"question": user_input, "context": context},
             config={"configurable": {"session_id": "abc123"}, "callbacks": [stream_handler]},
         )
+        # 🔧 가격 뒤 강제 개행 적용 후 최종 출력으로 덮어쓰기
+        formatted = _apply_price_newline_to_text(response)
+        placeholder.markdown(formatted)
 
-    st.session_state["messages"].append(("assistant", response))
+    # 메시지 저장은 포맷 적용본으로
+    st.session_state["messages"].append(("assistant", formatted))
 
-    if "운동화 추천이 종료되었습니다!" in response:
+    if "운동화 추천이 종료되었습니다!" in formatted:
         code = "8172"  # ✅ 인증번호 고정
         end_msg = f"인증번호: {code}"
         st.chat_message("assistant").write(end_msg)
