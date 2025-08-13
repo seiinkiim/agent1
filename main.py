@@ -336,7 +336,7 @@ if len(st.session_state["messages"]) > 0:
 # ---------------------------
 # 입력 & 응답
 # ---------------------------
-if user_input := st.chat_input("'운동화 추천해줘'를 입력하세요."):
+if user_input := st.chat_input("'운동화 추천해줘' 를 입력하세요."):
     st.chat_message("user").write(user_input)
     st.session_state["messages"].append(("user", user_input))
 
